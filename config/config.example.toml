@@ -1,0 +1,22 @@
+# TMDB API 配置
+[tmdb]
+api_key = "YOUR_TMDB_API_KEY"
+read_access_token = "YOUR_READ_ACCESS_TOKEN"
+base_url = "https://api.themoviedb.org/3"
+language = "zh-CN"
+include_adult = true  # 注意：代码中会强制设为 true
+
+# 数据库配置
+[database]
+url = "postgresql+asyncpg://user:password@localhost:5432/tmdb_api"
+
+# 日志配置
+[app_logger]
+level = "INFO"
+file = "logs/app.log"
+
+# 代理配置
+[proxy]
+enabled = false
+http = "http://127.0.0.1:7890"
+https = "http://127.0.0.1:7890"
