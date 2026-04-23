@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from datetime import datetime, timedelta
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Any, Dict
 from modules.media.models import APICache
 import hashlib
@@ -28,35 +29,38 @@ class CacheService:
 
         if cache_item:
             # 检查是否过期
-            if cache_item.expires_at > datetime.now(cache_item.expires_at.tzinfo):
+            if cache_item.expires_at > datetime.now(timezone.utc):
                 return cache_item.response_data
             else:
-                # 已过期，删除
-                await db.delete(cache_item)
-                await db.commit()
+                # 已过期，尝试删除
+                try:
+                    await db.delete(cache_item)
+                    await db.commit()
+                except Exception:
+                    # 并发删除可能失败，忽略
+                    await db.rollback()
         
         return None
 
     async def set(self, db: AsyncSession, endpoint: str, params: Dict[str, Any], data: Dict[str, Any], ttl_hours: int = 24):
         """设置缓存"""
         cache_key = self._generate_key(endpoint, params)
-        expires_at = datetime.now() + timedelta(hours=ttl_hours)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
 
-        # 检查是否已存在
-        stmt = select(APICache).where(APICache.cache_key == cache_key)
-        existing = (await db.execute(stmt)).scalar_one_or_none()
-
-        if existing:
-            existing.response_data = data
-            existing.expires_at = expires_at
-        else:
-            new_cache = APICache(
-                cache_key=cache_key,
-                response_data=data,
-                expires_at=expires_at
-            )
-            db.add(new_cache)
+        # 使用 PostgreSQL 的 ON CONFLICT 语法处理并发写入
+        stmt = pg_insert(APICache).values(
+            cache_key=cache_key,
+            response_data=data,
+            expires_at=expires_at
+        ).on_conflict_do_update(
+            index_elements=['cache_key'],
+            set_={
+                'response_data': data,
+                'expires_at': expires_at
+            }
+        )
         
+        await db.execute(stmt)
         await db.commit()
 
 cache_service = CacheService()
