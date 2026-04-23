@@ -11,8 +11,10 @@ class CacheService:
 
     def _generate_key(self, endpoint: str, params: Dict[str, Any]) -> str:
         """生成唯一的缓存键"""
+        # 排除 api_key，因为它不影响响应内容且可能因请求而异
+        filtered_params = {k: v for k, v in params.items() if k != "api_key"}
         # 对参数进行排序以确保一致性
-        sorted_params = sorted(params.items())
+        sorted_params = sorted(filtered_params.items())
         param_str = json.dumps(sorted_params)
         raw_key = f"{endpoint}:{param_str}"
         return hashlib.sha256(raw_key.encode()).hexdigest()

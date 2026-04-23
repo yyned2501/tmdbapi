@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, Path, Request
+from fastapi import APIRouter, Depends, Query, Path, Request, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Dict, Any, List
 from core.database import get_session
@@ -7,6 +7,8 @@ from modules.media.cache_service import cache_service
 from core.tmdb_client import tmdb_client
 from modules.scrapers.base import ScraperMediaResult
 import asyncio
+import httpx
+from core.logger import logger
 
 router = APIRouter(prefix="/3")
 
@@ -62,18 +64,27 @@ async def catch_all_tmdb(path: str, request: Request, db: AsyncSession = Depends
     return await _proxy_request(path, request, db)
 
 async def _proxy_request(endpoint: str, request: Request, db: AsyncSession):
-    # 获取所有查询参数
-    params = dict(request.query_params)
+    # 获取并注入完整参数，确保缓存键一致性
+    params = tmdb_client.get_full_params(dict(request.query_params))
     
     # 1. 尝试从缓存获取
     cached_data = await cache_service.get(db, endpoint, params)
     if cached_data:
-        from core.logger import logger
         logger.info(f"命中缓存: {endpoint}")
         return cached_data
 
     # 2. 调用 TMDB 获取原始数据
-    data = await tmdb_client.get(endpoint, params=params)
+    try:
+        data = await tmdb_client.get(endpoint, params=params)
+    except httpx.HTTPStatusError as e:
+        logger.error(f"TMDB API 请求失败: {e.response.status_code} - {endpoint}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"TMDB API error: {e.response.text}"
+        )
+    except Exception as e:
+        logger.error(f"代理请求发生意外错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
     
     # 3. 设置缓存 (默认 24 小时)
     await cache_service.set(db, endpoint, params, data)
@@ -107,7 +118,6 @@ async def _background_sync(data: Dict[str, Any], endpoint: str, db: AsyncSession
             async with async_session_factory() as session:
                 await media_service.sync_results(session, results_to_sync)
     except Exception as e:
-        from core.logger import logger
         logger.error(f"后台同步失败: {str(e)}")
 
 def _map_to_scraper_result(item: Dict[str, Any]) -> Optional[ScraperMediaResult]:
