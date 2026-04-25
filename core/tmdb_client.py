@@ -31,8 +31,8 @@ class TMDBClient:
         """获取完整的请求参数（包含注入的 API Key、语言和成人内容设置）"""
         full_params = dict(params) if params else {}
         
-        # 注入 API Key (如果没用 Bearer Token)
-        if not self.read_access_token:
+        # 注入 API Key (如果参数中没有且没用 Bearer Token)
+        if not self.read_access_token and "api_key" not in full_params:
             full_params["api_key"] = self.api_key
             
         # 强制注入成人内容解锁
@@ -48,6 +48,7 @@ class TMDBClient:
         method: str, 
         endpoint: str, 
         params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """发起异步请求"""
@@ -55,13 +56,18 @@ class TMDBClient:
         
         # 获取完整参数
         full_params = self.get_full_params(params)
+        
+        # 合并请求头
+        request_headers = self.headers.copy()
+        if headers:
+            request_headers.update(headers)
 
         # httpx 0.20+ 使用 proxy 参数
         proxy_url = None
         if self.proxy:
             proxy_url = self.proxy.get("https://") or self.proxy.get("http://")
 
-        async with httpx.AsyncClient(proxy=proxy_url, headers=self.headers, timeout=30.0) as client:
+        async with httpx.AsyncClient(proxy=proxy_url, headers=request_headers, timeout=30.0) as client:
             try:
                 logger.info(f"正在请求 TMDB: {method} {url} params={full_params}")
                 response = await client.request(method, url, params=full_params, **kwargs)
@@ -75,8 +81,8 @@ class TMDBClient:
                 logger.error(f"TMDB API 请求发生异常: {str(e)}")
                 raise
 
-    async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, **kwargs):
-        return await self.request("GET", endpoint, params, **kwargs)
+    async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, **kwargs):
+        return await self.request("GET", endpoint, params, headers=headers, **kwargs)
 
 # 单例模式
 tmdb_client = TMDBClient()

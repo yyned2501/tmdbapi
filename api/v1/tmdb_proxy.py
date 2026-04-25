@@ -64,6 +64,10 @@ async def catch_all_tmdb(path: str, request: Request, db: AsyncSession = Depends
     return await _proxy_request(path, request, db)
 
 async def _proxy_request(endpoint: str, request: Request, db: AsyncSession):
+    # 提取 Authorization 头部，允许用户使用自己的 Bearer Token
+    auth_header = request.headers.get("Authorization")
+    headers = {"Authorization": auth_header} if auth_header else None
+
     # 获取并注入完整参数，确保缓存键一致性
     params = tmdb_client.get_full_params(dict(request.query_params))
     
@@ -82,7 +86,23 @@ async def _proxy_request(endpoint: str, request: Request, db: AsyncSession):
         else:
             logger.info(f"缓存未命中，请求 TMDB: {endpoint}")
             
-        data = await tmdb_client.get(endpoint, params=params)
+        try:
+            data = await tmdb_client.get(endpoint, params=params, headers=headers)
+        except httpx.HTTPStatusError as e:
+            # 如果用户提供的 API Key 或 Token 无效 (401)，尝试使用系统默认凭据重试
+            if e.response.status_code == 401 and (auth_header or "api_key" in request.query_params):
+                logger.warning(f"用户提供的凭据无效 (401)，尝试使用系统默认凭据重试: {endpoint}")
+                
+                # 准备重试参数：移除用户传入的 api_key，让 get_full_params 注入系统默认值
+                retry_query_params = dict(request.query_params)
+                retry_query_params.pop("api_key", None)
+                full_retry_params = tmdb_client.get_full_params(retry_query_params)
+                
+                # 重试请求 (不带自定义 headers，将使用系统配置的 read_access_token)
+                data = await tmdb_client.get(endpoint, params=full_retry_params)
+            else:
+                # 其他错误或非用户凭据导致的 401，直接抛出
+                raise
         
         # 请求成功，设置/更新缓存
         await cache_service.set(db, endpoint, params, data)
