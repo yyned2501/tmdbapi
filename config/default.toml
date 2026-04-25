@@ -20,3 +20,8 @@ file = "logs/app.log"
 enabled = false
 http = "http://127.0.0.1:7890"
 https = "http://127.0.0.1:7890"
+
+# 缓存配置
+[cache]
+prefer_cache_hours = 24    # 优先使用缓存的时间（小时）
+cleanup_cache_hours = 168  # 缓存彻底过期并可被清理的时间（小时）

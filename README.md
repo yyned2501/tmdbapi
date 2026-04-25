@@ -7,7 +7,7 @@
 - **强制成人内容解锁**：底层自动注入 `include_adult=true`，确保所有请求均可获取成人资源。
 - **TMDB API 完美兼容**：提供 `/3` 前缀路由，支持作为自定义 TMDB API 代理供其他应用（如 Telegram Userbots, 媒体服务器等）使用。
 - **多来源刮削架构**：支持从 TMDB 获取数据，并预留了 MDC (Metadata Collector) 刮削接口。
-- **高性能缓存系统**：基于 PostgreSQL 实现 API 响应缓存，减少对 TMDB 的请求频率，提升响应速度。
+- **高可用缓存系统**：基于 PostgreSQL 实现，支持“双重过期”与“Stale-While-Revalidate”机制。在缓存过期但未彻底失效时，优先尝试更新数据；若 TMDB 访问失败，自动回退使用过期缓存，确保服务高可用。
 - **自动异步同步**：在请求数据的同时，自动将元数据异步同步到本地数据库。
 - **全栈异步**：基于 `FastAPI` + `SQLAlchemy Async` + `HTTPX` 构建。
 

@@ -18,13 +18,18 @@
 - `config/`: 配置层，存储 TOML 配置文件。
 
 ## 4. 数据流向
-1. 用户发起 `GET /3/search/movie?query=xxx` (兼容 TMDB 格式) 或 `GET /api/v1/media/search?query=xxx` 请求。
-2. `api/v1/tmdb_proxy.py` 或 `api/v1/media.py` 调用 `media_service.search_and_sync`。
-3. `media_service` 根据参数选择对应的 `Scraper` (如 `TMDBScraper`)。
-4. `Scraper` 调用 `tmdb_client` 发起网络请求（强制注入 `include_adult=true`）。
-5. `Scraper` 将原始 JSON 转换为统一的 `ScraperMediaResult`。
-6. `media_service` 将结果持久化到 PostgreSQL 数据库。
-7. 返回符合 TMDB 标准格式 (通过 `TMDBMovieResult` 包装) 或本地格式的数据给用户。
+1. 用户发起 `GET /3/search/movie?query=xxx` (兼容 TMDB 格式) 请求。
+2. `api/v1/tmdb_proxy.py` 拦截请求并生成缓存键。
+3. **缓存检查**:
+    - **命中新鲜缓存** (在 `prefer_cache_hours` 内): 直接返回缓存数据。
+    - **命中过期缓存** (超过 `prefer_cache_hours` 但在 `cleanup_cache_hours` 内): 尝试请求 TMDB。
+        - **TMDB 成功**: 更新缓存并返回新数据。
+        - **TMDB 失败**: 回退使用过期缓存数据。
+    - **缓存未命中/彻底过期**: 请求 TMDB。
+        - **TMDB 成功**: 写入缓存并返回。
+        - **TMDB 失败**: 返回错误响应。
+4. **异步同步**: 请求成功后，异步触发 `media_service` 将结果持久化到 `media` 表。
+5. 返回数据给用户。
 
 ## 6. TMDB API 兼容性
 本项目通过 `/3` 前缀的路由实现了对官方 TMDB API 的部分兼容，包括：

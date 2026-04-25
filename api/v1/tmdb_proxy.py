@@ -68,31 +68,46 @@ async def _proxy_request(endpoint: str, request: Request, db: AsyncSession):
     params = tmdb_client.get_full_params(dict(request.query_params))
     
     # 1. 尝试从缓存获取
-    cached_data = await cache_service.get(db, endpoint, params)
-    if cached_data:
-        logger.info(f"命中缓存: {endpoint}")
+    cached_data, is_stale = await cache_service.get(db, endpoint, params)
+    
+    # 如果命中了新鲜缓存，直接返回
+    if cached_data and not is_stale:
+        logger.info(f"命中新鲜缓存: {endpoint}")
         return cached_data
 
-    # 2. 调用 TMDB 获取原始数据
+    # 2. 调用 TMDB 获取原始数据 (如果缓存不存在，或者已过优先缓存期)
     try:
+        if cached_data:
+            logger.info(f"缓存已过优先期，尝试请求 TMDB 更新: {endpoint}")
+        else:
+            logger.info(f"缓存未命中，请求 TMDB: {endpoint}")
+            
         data = await tmdb_client.get(endpoint, params=params)
-    except httpx.HTTPStatusError as e:
-        logger.error(f"TMDB API 请求失败: {e.response.status_code} - {endpoint}")
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"TMDB API error: {e.response.text}"
-        )
+        
+        # 请求成功，设置/更新缓存
+        await cache_service.set(db, endpoint, params, data)
+        
+        # 异步触发同步逻辑
+        asyncio.create_task(_background_sync(data, endpoint, db))
+        
+        return data
+
     except Exception as e:
-        logger.error(f"代理请求发生意外错误: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-    
-    # 3. 设置缓存 (默认 24 小时)
-    await cache_service.set(db, endpoint, params, data)
-    
-    # 4. 异步触发同步逻辑
-    asyncio.create_task(_background_sync(data, endpoint, db))
-    
-    return data
+        # 如果请求失败且有过期缓存，则回退到过期缓存
+        if cached_data:
+            logger.warning(f"请求 TMDB 失败，回退到过期缓存: {str(e)}")
+            return cached_data
+        
+        # 否则抛出异常
+        if isinstance(e, httpx.HTTPStatusError):
+            logger.error(f"TMDB API 请求失败: {e.response.status_code} - {endpoint}")
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"TMDB API error: {e.response.text}"
+            )
+        else:
+            logger.error(f"代理请求发生意外错误: {str(e)}")
+            raise HTTPException(status_code=500, detail="Internal Server Error")
 
 async def _background_sync(data: Dict[str, Any], endpoint: str, db: AsyncSession):
     """后台同步逻辑"""
