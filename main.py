@@ -16,7 +16,7 @@ def start_server():
         "api.main:app", 
         host=host, 
         port=port, 
-        reload=True  # 开发模式下开启热重载
+        # reload=True  # 开发模式下开启热重载
     )
 
 if __name__ == "__main__":

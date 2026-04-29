@@ -22,6 +22,13 @@ async def startup():
         await conn.run_sync(Base.metadata.create_all)
     logger.info("数据库表已同步")
 
+@app.on_event("shutdown")
+async def shutdown():
+    logger.info("正在关闭应用...")
+    from core.tmdb_client import tmdb_client
+    await tmdb_client.close()
+    logger.info("TMDB Client 已关闭")
+
 @app.get("/")
 async def root():
     return {"message": "TMDB API 媒体元数据管理后端已就绪", "status": "ok"}

@@ -26,6 +26,30 @@ class TMDBClient:
                 "http://": config.proxy.http,
                 "https://": config.proxy.https,
             }
+        
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def get_client(self) -> httpx.AsyncClient:
+        """获取或创建异步 HTTP 客户端（复用连接池）"""
+        if self._client is None or self._client.is_closed:
+            proxy_url = None
+            if self.proxy:
+                proxy_url = self.proxy.get("https://") or self.proxy.get("http://")
+            
+            self._client = httpx.AsyncClient(
+                proxy=proxy_url, 
+                headers=self.headers, 
+                timeout=30.0,
+                # 显式配置连接池以优化性能
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
+            )
+        return self._client
+
+    async def close(self):
+        """关闭客户端"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
     def get_full_params(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """获取完整的请求参数（包含注入的 API Key、语言和成人内容设置）"""
@@ -62,24 +86,19 @@ class TMDBClient:
         if headers:
             request_headers.update(headers)
 
-        # httpx 0.20+ 使用 proxy 参数
-        proxy_url = None
-        if self.proxy:
-            proxy_url = self.proxy.get("https://") or self.proxy.get("http://")
-
-        async with httpx.AsyncClient(proxy=proxy_url, headers=request_headers, timeout=30.0) as client:
-            try:
-                logger.info(f"正在请求 TMDB: {method} {url} params={full_params}")
-                response = await client.request(method, url, params=full_params, **kwargs)
-                logger.info(f"TMDB 响应状态码: {response.status_code}")
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"TMDB API 请求失败: {e.response.status_code} - {e.response.text}")
-                raise
-            except Exception as e:
-                logger.error(f"TMDB API 请求发生异常: {str(e)}")
-                raise
+        client = await self.get_client()
+        try:
+            logger.info(f"正在请求 TMDB: {method} {url} params={full_params}")
+            response = await client.request(method, url, params=full_params, headers=request_headers, **kwargs)
+            logger.info(f"TMDB 响应状态码: {response.status_code}")
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"TMDB API 请求失败: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"TMDB API 请求发生异常: {str(e)}")
+            raise
 
     async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, **kwargs):
         return await self.request("GET", endpoint, params, headers=headers, **kwargs)

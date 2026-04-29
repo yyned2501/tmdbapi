@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, Path, Request, HTTPException
+from fastapi import APIRouter, Depends, Query, Path, Request, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Dict, Any, List
 from core.database import get_session
@@ -12,58 +12,71 @@ from core.logger import logger
 
 router = APIRouter(prefix="/3")
 
+# 限制后台同步任务的并发数，防止内存泄漏和数据库压力
+sync_semaphore = asyncio.Semaphore(5)
+
 @router.get("/search/movie")
 async def search_movie(
     request: Request,
+    background_tasks: BackgroundTasks,
     query: str = Query(..., description="搜索关键词"),
     db: AsyncSession = Depends(get_session)
 ):
     """兼容 TMDB 的电影搜索接口"""
-    return await _proxy_request("search/movie", request, db)
+    return await _proxy_request("search/movie", request, db, background_tasks)
 
 @router.get("/search/tv")
 async def search_tv(
     request: Request,
+    background_tasks: BackgroundTasks,
     query: str = Query(..., description="搜索关键词"),
     db: AsyncSession = Depends(get_session)
 ):
     """兼容 TMDB 的剧集搜索接口"""
-    return await _proxy_request("search/tv", request, db)
+    return await _proxy_request("search/tv", request, db, background_tasks)
 
 @router.get("/movie/{movie_id}")
 async def get_movie_detail(
     movie_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session)
 ):
     """兼容 TMDB 的电影详情接口"""
-    return await _proxy_request(f"movie/{movie_id}", request, db)
+    return await _proxy_request(f"movie/{movie_id}", request, db, background_tasks)
 
 @router.get("/tv/{tv_id}")
 async def get_tv_detail(
     tv_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session)
 ):
     """兼容 TMDB 的剧集详情接口"""
-    return await _proxy_request(f"tv/{tv_id}", request, db)
+    return await _proxy_request(f"tv/{tv_id}", request, db, background_tasks)
 
 @router.get("/tv/{tv_id}/season/{season_number}")
 async def get_tv_season_detail(
     tv_id: str,
     season_number: int,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session)
 ):
     """兼容 TMDB 的剧集季度详情接口"""
-    return await _proxy_request(f"tv/{tv_id}/season/{season_number}", request, db)
+    return await _proxy_request(f"tv/{tv_id}/season/{season_number}", request, db, background_tasks)
 
 @router.get("/{path:path}")
-async def catch_all_tmdb(path: str, request: Request, db: AsyncSession = Depends(get_session)):
+async def catch_all_tmdb(
+    path: str, 
+    request: Request, 
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_session)
+):
     """兜底转发所有其他 TMDB 请求"""
-    return await _proxy_request(path, request, db)
+    return await _proxy_request(path, request, db, background_tasks)
 
-async def _proxy_request(endpoint: str, request: Request, db: AsyncSession):
+async def _proxy_request(endpoint: str, request: Request, db: AsyncSession, background_tasks: BackgroundTasks):
     # 提取 Authorization 头部，允许用户使用自己的 Bearer Token
     auth_header = request.headers.get("Authorization")
     headers = {"Authorization": auth_header} if auth_header else None
@@ -107,8 +120,9 @@ async def _proxy_request(endpoint: str, request: Request, db: AsyncSession):
         # 请求成功，设置/更新缓存
         await cache_service.set(db, endpoint, params, data)
         
-        # 异步触发同步逻辑
-        asyncio.create_task(_background_sync(data, endpoint, db))
+        # 使用 FastAPI BackgroundTasks 异步触发同步逻辑，不阻塞响应
+        # 这样可以确保请求结束后再处理繁重的同步逻辑，且由 FastAPI 管理生命周期
+        background_tasks.add_task(_background_sync, data, endpoint)
         
         return data
 
@@ -129,31 +143,33 @@ async def _proxy_request(endpoint: str, request: Request, db: AsyncSession):
             logger.error(f"代理请求发生意外错误: {str(e)}")
             raise HTTPException(status_code=500, detail="Internal Server Error")
 
-async def _background_sync(data: Dict[str, Any], endpoint: str, db: AsyncSession):
+async def _background_sync(data: Dict[str, Any], endpoint: str):
     """后台同步逻辑"""
-    try:
-        results_to_sync = []
-        
-        # 处理搜索结果列表
-        if "results" in data and isinstance(data["results"], list):
-            for item in data["results"]:
-                res = _map_to_scraper_result(item)
+    # 使用信号量限制并发，防止瞬间产生大量数据库连接和内存占用
+    async with sync_semaphore:
+        try:
+            results_to_sync = []
+            
+            # 处理搜索结果列表
+            if "results" in data and isinstance(data["results"], list):
+                for item in data["results"]:
+                    res = _map_to_scraper_result(item)
+                    if res:
+                        results_to_sync.append(res)
+            # 处理详情单条数据
+            elif "id" in data:
+                res = _map_to_scraper_result(data)
                 if res:
                     results_to_sync.append(res)
-        # 处理详情单条数据
-        elif "id" in data:
-            res = _map_to_scraper_result(data)
-            if res:
-                results_to_sync.append(res)
-        
-        if results_to_sync:
-            # 注意：在后台任务中使用新的 session 或确保当前 session 仍然可用
-            # 这里简化处理，实际生产建议从 session_factory 创建新 session
-            from core.database import async_session_factory
-            async with async_session_factory() as session:
-                await media_service.sync_results(session, results_to_sync)
-    except Exception as e:
-        logger.error(f"后台同步失败: {str(e)}")
+            
+            if results_to_sync:
+                # 在后台任务中使用全新的 session，不依赖请求上下文的 session
+                from core.database import async_session_factory
+                async with async_session_factory() as session:
+                    await media_service.sync_results(session, results_to_sync)
+                    logger.info(f"后台同步完成: {endpoint}, 同步了 {len(results_to_sync)} 条数据")
+        except Exception as e:
+            logger.error(f"后台同步失败: {str(e)}")
 
 def _map_to_scraper_result(item: Dict[str, Any]) -> Optional[ScraperMediaResult]:
     """将 TMDB 原始数据映射为内部通用的 ScraperMediaResult"""
