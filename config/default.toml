@@ -5,10 +5,13 @@ read_access_token = ""
 base_url = "https://api.themoviedb.org/3"
 language = "zh-CN"
 include_adult = true
+request_retries = 1
 
 # 数据库配置
 [database]
 url = "postgresql+asyncpg://postgres:postgres@localhost:5432/tmdb_api"
+pool_recycle_seconds = 1800
+startup_check_required = false
 
 # 日志配置
 [app_logger]

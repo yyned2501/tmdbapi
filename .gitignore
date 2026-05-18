@@ -29,3 +29,5 @@ thumbs.db
 # Config
 config/config.toml
 *.session*
+
+plans/
