@@ -4,13 +4,14 @@ from typing import List, Optional
 from modules.media.models import Media
 from modules.media.schemas import MediaCreate
 from modules.scrapers import SCRAPERS
+from modules.scrapers.base import ScraperMediaResult
 from core.logger import logger
 
 class MediaService:
     """媒体业务逻辑层"""
 
     async def search_and_sync(self, db: AsyncSession, query: str, scraper_name: str = "tmdb", **kwargs) -> List[Media]:
-        """搜索并同步数据到数据库"""
+        """搜索并同步数据到数据库 (已进行批量查询性能优化)"""
         scraper = SCRAPERS.get(scraper_name)
         if not scraper:
             logger.error(f"未找到刮削器: {scraper_name}")
@@ -20,14 +21,21 @@ class MediaService:
         results = await scraper.search(query, **kwargs)
         logger.info(f"刮削器 {scraper_name} 返回了 {len(results)} 条结果")
         
+        if not results:
+            return []
+
+        # 1. 一次性查询出数据库中已存在的所有相关记录 (批量查询优化)
+        source_ids = [res.source_id for res in results]
+        stmt = select(Media).where(
+            Media.scraper_source == scraper_name,
+            Media.scraper_id.in_(source_ids)
+        )
+        existing_list = (await db.execute(stmt)).scalars().all()
+        existing_map = {m.scraper_id: m for m in existing_list}
+
         synced_media = []
         for res in results:
-            # 检查数据库是否已存在
-            stmt = select(Media).where(
-                Media.scraper_source == res.source,
-                Media.scraper_id == res.source_id
-            )
-            existing = (await db.execute(stmt)).scalar_one_or_none()
+            existing = existing_map.get(res.source_id)
             
             if existing:
                 # 更新现有记录
@@ -66,13 +74,21 @@ class MediaService:
         return (await db.execute(stmt)).scalar_one_or_none()
 
     async def sync_results(self, db: AsyncSession, results: List[ScraperMediaResult]):
-        """批量同步刮削结果到数据库"""
+        """批量同步刮削结果到数据库 (已进行批量查询性能优化)"""
+        if not results:
+            return
+
+        # 1. 一次性查询出数据库中已存在的所有相关记录 (批量查询优化)
+        source_ids = [res.source_id for res in results]
+        stmt = select(Media).where(
+            Media.scraper_id.in_(source_ids)
+        )
+        existing_list = (await db.execute(stmt)).scalars().all()
+        existing_map = {f"{m.scraper_source}:{m.scraper_id}": m for m in existing_list}
+        
         for res in results:
-            stmt = select(Media).where(
-                Media.scraper_source == res.source,
-                Media.scraper_id == res.source_id
-            )
-            existing = (await db.execute(stmt)).scalar_one_or_none()
+            key = f"{res.source}:{res.source_id}"
+            existing = existing_map.get(key)
             
             if existing:
                 existing.title = res.title

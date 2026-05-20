@@ -41,7 +41,7 @@ class APICache(Base):
     id = Column(Integer, primary_key=True, index=True)
     cache_key = Column(String(512), unique=True, index=True, nullable=False)
     response_data = Column(JSON, nullable=False)
-    expires_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     def __repr__(self):
