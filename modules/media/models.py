@@ -1,9 +1,12 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, JSON, DateTime, func
+from sqlalchemy import Column, Integer, String, Text, Boolean, JSON, DateTime, func, UniqueConstraint
 from core.database import Base
 
 class Media(Base):
     """媒体元数据模型"""
     __tablename__ = "media"
+    __table_args__ = (
+        UniqueConstraint('scraper_source', 'scraper_id', name='uq_media_source_id'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     
@@ -33,6 +36,7 @@ class Media(Base):
 
     def __repr__(self):
         return f"<Media(title='{self.title}', source='{self.scraper_source}')>"
+
 
 class APICache(Base):
     """API 响应缓存模型"""

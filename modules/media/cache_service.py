@@ -40,13 +40,10 @@ class CacheService:
         now = datetime.now(timezone.utc)
         
         # 1. 检查是否彻底过期（超过 cleanup_cache_hours）
+        # 分布式安全优化：读取时检测到过期不执行被动 db.delete 以消灭并发 StaleDataError，
+        # 直接判定失效并返回 None，由系统后台定时任务安全统一回收。
         if cache_item.expires_at <= now:
-            logger.info(f"缓存彻底过期，准备删除: {endpoint}")
-            try:
-                await db.delete(cache_item)
-                await db.commit()
-            except Exception:
-                await db.rollback()
+            logger.info(f"缓存彻底过期 (返回失效，留待后台定时任务统一回收): {endpoint}")
             return None, False
 
         # 2. 检查是否过了优先缓存期（超过 prefer_cache_hours）

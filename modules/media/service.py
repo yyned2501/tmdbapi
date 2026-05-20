@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from modules.media.models import Media
 from modules.media.schemas import MediaCreate
@@ -11,7 +12,7 @@ class MediaService:
     """媒体业务逻辑层"""
 
     async def search_and_sync(self, db: AsyncSession, query: str, scraper_name: str = "tmdb", **kwargs) -> List[Media]:
-        """搜索并同步数据到数据库 (已进行批量查询性能优化)"""
+        """搜索并同步数据到数据库 (已进行批量查询性能优化，已进行分布式安全防护)"""
         scraper = SCRAPERS.get(scraper_name)
         if not scraper:
             logger.error(f"未找到刮削器: {scraper_name}")
@@ -65,7 +66,22 @@ class MediaService:
                 db.add(new_media)
                 synced_media.append(new_media)
         
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # 分布式安全自愈：捕获多机并发冲突导致的唯一性约束失败，安全回滚并重新查询获取
+            await db.rollback()
+            logger.warning(
+                f"并发写入发生唯一约束冲突 (另一个分布式节点已抢先写入 {scraper_name})，"
+                f"系统已自动执行回滚并保持数据一致性"
+            )
+            # 重新查回已存在的记录以保证返回列表正确
+            stmt = select(Media).where(
+                Media.scraper_source == scraper_name,
+                Media.scraper_id.in_(source_ids)
+            )
+            synced_media = list((await db.execute(stmt)).scalars().all())
+            
         return synced_media
 
     async def get_by_id(self, db: AsyncSession, media_id: int) -> Optional[Media]:
@@ -74,7 +90,7 @@ class MediaService:
         return (await db.execute(stmt)).scalar_one_or_none()
 
     async def sync_results(self, db: AsyncSession, results: List[ScraperMediaResult]):
-        """批量同步刮削结果到数据库 (已进行批量查询性能优化)"""
+        """批量同步刮削结果到数据库 (已进行批量查询性能优化，已进行分布式安全防护)"""
         if not results:
             return
 
@@ -114,7 +130,12 @@ class MediaService:
                 )
                 db.add(new_media)
         
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # 批量后台同步如果遇到冲突，安全回滚即可（数据以已抢先写入成功的记录为准）
+            await db.rollback()
+            logger.warning("后台批量同步检测到分布式写入唯一约束冲突，已执行自动回退。")
 
 # 导出实例
 media_service = MediaService()
