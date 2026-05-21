@@ -149,8 +149,10 @@ class TMDBClient:
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as exc:
-                logger.error(
-                    f"TMDB API 请求失败: endpoint={endpoint} status_code={exc.response.status_code} "
+                status_code = exc.response.status_code
+                log_func = logger.warning if status_code == 404 else logger.error
+                log_func(
+                    f"TMDB API 请求失败: endpoint={endpoint} status_code={status_code} "
                     f"type={type(exc).__name__} detail={repr(exc)}"
                 )
                 raise
