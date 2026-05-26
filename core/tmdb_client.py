@@ -49,6 +49,7 @@ class TMDBClient:
             httpx.CloseError,
             httpx.PoolTimeout,
             httpx.RemoteProtocolError,
+            httpx.ProxyError,
         )
         if isinstance(exc, recoverable_types):
             return True
@@ -167,6 +168,12 @@ class TMDBClient:
                 await self.reset_client(
                     f"request_retry endpoint={endpoint} attempt={attempt + 1}"
                 )
+
+                # 引入指数退避延迟，避免因网络/代理短时波动导致立即重试同样失败
+                import asyncio
+                backoff_delay = 2 * (attempt + 1)
+                logger.info(f"由于网络/代理异常，将在 {backoff_delay} 秒后重试...")
+                await asyncio.sleep(backoff_delay)
 
         raise RuntimeError(f"TMDB 请求重试逻辑异常结束: endpoint={endpoint}")
 
