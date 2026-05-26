@@ -12,6 +12,7 @@ settings = Dynaconf(
         os.path.join(BASE_DIR, "config/config.toml"),
     ],
     load_dotenv=True,
+    merge_enabled=True,
     base_dir=BASE_DIR,
 )
 
