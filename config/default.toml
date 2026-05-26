@@ -5,7 +5,7 @@ read_access_token = ""
 base_url = "https://api.themoviedb.org/3"
 language = "zh-CN"
 include_adult = true
-request_retries = 1
+request_retries = 3
 
 # 数据库配置
 [database]

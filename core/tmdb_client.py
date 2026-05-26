@@ -39,7 +39,9 @@ class TMDBClient:
         return self.proxy.get("https://") or self.proxy.get("http://")
 
     def _should_recreate_client(self, exc: Exception) -> bool:
+        # 支持所有 httpx 请求类异常（涵盖连接、超时、代理、协议等错误）
         recoverable_types = (
+            httpx.RequestError,
             httpx.ConnectError,
             httpx.ConnectTimeout,
             httpx.ReadError,
