@@ -158,12 +158,17 @@ class TMDBClient:
                 )
                 raise
             except Exception as exc:
-                logger.error(
-                    f"TMDB API 请求发生异常: endpoint={endpoint} attempt={attempt + 1}/{self.max_retries + 1} "
+                if attempt >= self.max_retries or not self._should_recreate_client(exc):
+                    logger.error(
+                        f"TMDB API 请求最终失败: endpoint={endpoint} attempt={attempt + 1}/{self.max_retries + 1} "
+                        f"proxy_enabled={bool(self.proxy)} type={type(exc).__name__} detail={repr(exc)}"
+                    )
+                    raise
+
+                logger.warning(
+                    f"TMDB API 请求发生异常（准备重试）: endpoint={endpoint} attempt={attempt + 1}/{self.max_retries + 1} "
                     f"proxy_enabled={bool(self.proxy)} type={type(exc).__name__} detail={repr(exc)}"
                 )
-                if attempt >= self.max_retries or not self._should_recreate_client(exc):
-                    raise
 
                 await self.reset_client(
                     f"request_retry endpoint={endpoint} attempt={attempt + 1}"
