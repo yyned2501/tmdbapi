@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict, Optional
 
 import anyio
@@ -87,22 +88,36 @@ class TMDBClient:
             self._client = await self._create_client()
         return self._client
 
-    async def reset_client(self, reason: str) -> None:
+    async def reset_client(self, client: Optional[httpx.AsyncClient] = None, reason: str = "") -> None:
         """主动释放并重建 HTTP 客户端。"""
-        if self._client and not self._client.is_closed:
-            try:
-                await self._client.aclose()
-            except Exception as exc:
-                logger.warning(
-                    f"关闭 TMDB HTTP 客户端时发生异常: reason={reason} "
-                    f"type={type(exc).__name__} detail={repr(exc)}"
-                )
+        if client is not None and self._client is not client:
+            logger.warning(
+                f"跳过重置 TMDB HTTP 客户端: 已经由其他并发请求重置. "
+                f"reason={reason}"
+            )
+            return
+
+        target_client = self._client if client is None else client
         self._client = None
         logger.warning(f"TMDB HTTP 客户端已重置: reason={reason}")
 
+        if target_client and not target_client.is_closed:
+            # 延迟 5 秒安全关闭旧连接池，避免直接中断其他活跃的并发请求
+            async def safe_close():
+                try:
+                    await asyncio.sleep(5)
+                    await target_client.aclose()
+                    logger.info(f"旧 TMDB HTTP 客户端已在后台延迟安全关闭. reason={reason}")
+                except Exception as exc:
+                    logger.warning(
+                        f"在后台延迟关闭旧 TMDB HTTP 客户端时发生异常: "
+                        f"type={type(exc).__name__} detail={repr(exc)}"
+                    )
+            asyncio.create_task(safe_close())
+
     async def close(self):
         """关闭客户端。"""
-        await self.reset_client("application_shutdown")
+        await self.reset_client(reason="application_shutdown")
 
     def get_full_params(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """获取完整的请求参数（包含注入的 API Key、语言和成人内容设置）。"""
@@ -179,6 +194,7 @@ class TMDBClient:
                 )
 
                 await self.reset_client(
+                    client,
                     f"request_retry endpoint={endpoint} attempt={attempt + 1}"
                 )
 
