@@ -34,6 +34,9 @@ class TMDBClient:
             }
 
         self._client: Optional[httpx.AsyncClient] = None
+        self._state_lock = asyncio.Lock()
+        self._active_requests = 0
+        self._pending_close: Optional[httpx.AsyncClient] = None
 
     def _get_proxy_url(self) -> Optional[str]:
         if not self.proxy:
@@ -82,38 +85,64 @@ class TMDBClient:
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
 
+    async def _acquire_client(self) -> httpx.AsyncClient:
+        async with self._state_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = await self._create_client()
+            self._active_requests += 1
+            return self._client
+
+    async def _release_client(self, client: httpx.AsyncClient) -> None:
+        pending_close: Optional[httpx.AsyncClient] = None
+        async with self._state_lock:
+            self._active_requests = max(0, self._active_requests - 1)
+            if self._active_requests == 0 and self._pending_close is not None:
+                pending_close = self._pending_close
+                self._pending_close = None
+
+        if pending_close and not pending_close.is_closed:
+            try:
+                await pending_close.aclose()
+                logger.info("旧 TMDB HTTP 客户端已在请求结束后安全关闭")
+            except Exception as exc:
+                logger.warning(
+                    f"在关闭旧 TMDB HTTP 客户端时发生异常: type={type(exc).__name__} detail={repr(exc)}"
+                )
+
     async def get_client(self) -> httpx.AsyncClient:
         """获取或创建异步 HTTP 客户端（复用连接池）。"""
-        if self._client is None or self._client.is_closed:
-            self._client = await self._create_client()
-        return self._client
+        return await self._acquire_client()
 
     async def reset_client(self, client: Optional[httpx.AsyncClient] = None, reason: str = "") -> None:
         """主动释放并重建 HTTP 客户端。"""
-        if client is not None and self._client is not client:
-            logger.warning(
-                f"跳过重置 TMDB HTTP 客户端: 已经由其他并发请求重置. "
-                f"reason={reason}"
-            )
-            return
+        async with self._state_lock:
+            if client is not None and self._client is not client:
+                logger.warning(
+                    f"跳过重置 TMDB HTTP 客户端: 已经由其他并发请求重置. "
+                    f"reason={reason}"
+                )
+                return
 
-        target_client = self._client if client is None else client
-        self._client = None
-        logger.warning(f"TMDB HTTP 客户端已重置: reason={reason}")
+            target_client = self._client if client is None else client
+            self._client = None
+            logger.warning(f"TMDB HTTP 客户端已重置: reason={reason}")
+
+            if target_client and not target_client.is_closed:
+                if self._active_requests > 0:
+                    self._pending_close = target_client
+                    logger.info(
+                        f"旧 TMDB HTTP 客户端将延迟到所有活跃请求完成后关闭. reason={reason}"
+                    )
+                    return
 
         if target_client and not target_client.is_closed:
-            # 延迟 5 秒安全关闭旧连接池，避免直接中断其他活跃的并发请求
-            async def safe_close():
-                try:
-                    await asyncio.sleep(5)
-                    await target_client.aclose()
-                    logger.info(f"旧 TMDB HTTP 客户端已在后台延迟安全关闭. reason={reason}")
-                except Exception as exc:
-                    logger.warning(
-                        f"在后台延迟关闭旧 TMDB HTTP 客户端时发生异常: "
-                        f"type={type(exc).__name__} detail={repr(exc)}"
-                    )
-            asyncio.create_task(safe_close())
+            try:
+                await target_client.aclose()
+                logger.info(f"旧 TMDB HTTP 客户端已关闭. reason={reason}")
+            except Exception as exc:
+                logger.warning(
+                    f"在关闭旧 TMDB HTTP 客户端时发生异常: type={type(exc).__name__} detail={repr(exc)}"
+                )
 
     async def close(self):
         """关闭客户端。"""
@@ -199,10 +228,11 @@ class TMDBClient:
                 )
 
                 # 引入指数退避延迟，避免因网络/代理短时波动导致立即重试同样失败
-                import asyncio
                 backoff_delay = 2 * (attempt + 1)
                 logger.info(f"由于网络/代理异常，将在 {backoff_delay} 秒后重试...")
                 await asyncio.sleep(backoff_delay)
+            finally:
+                await self._release_client(client)
 
         raise RuntimeError(f"TMDB 请求重试逻辑异常结束: endpoint={endpoint}")
 
