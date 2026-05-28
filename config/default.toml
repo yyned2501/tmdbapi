@@ -6,6 +6,8 @@ base_url = "https://api.themoviedb.org/3"
 language = "zh-CN"
 include_adult = true
 request_retries = 3
+connect_timeout = 10.0
+read_timeout = 30.0
 
 # 数据库配置
 [database]

@@ -1,6 +1,7 @@
 import asyncio
 from typing import Any, Dict, Optional
 
+import anyio
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -201,6 +202,13 @@ async def _proxy_request(
                 status_code=status_code,
                 detail=f"TMDB API error: {exc.response.text}",
             )
+
+        is_network_err = isinstance(exc, (httpx.RequestError, anyio.ClosedResourceError)) or type(exc).__name__ == "ClosedResourceError"
+        if is_network_err:
+            logger.warning(
+                f"代理请求发生网络/代理超时错误: endpoint={endpoint} type={type(exc).__name__} detail={repr(exc)}"
+            )
+            raise HTTPException(status_code=502, detail="Bad Gateway")
 
         logger.error(
             f"代理请求发生意外错误: endpoint={endpoint} type={type(exc).__name__} detail={repr(exc)}"

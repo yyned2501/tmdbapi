@@ -17,6 +17,12 @@ class TMDBClient:
         self.read_access_token = config.tmdb.read_access_token
         self.language = config.tmdb.language
         self.max_retries = int(getattr(config.tmdb, "request_retries", 1))
+        self.connect_timeout = float(getattr(config.tmdb, "connect_timeout", 10.0))
+        self.read_timeout = float(getattr(config.tmdb, "read_timeout", 30.0))
+        self.timeout = httpx.Timeout(
+            timeout=self.read_timeout,
+            connect=self.connect_timeout,
+        )
 
         # 设置请求头
         self.headers = {
@@ -35,8 +41,7 @@ class TMDBClient:
 
         self._client: Optional[httpx.AsyncClient] = None
         self._state_lock = asyncio.Lock()
-        self._active_requests = 0
-        self._pending_close: Optional[httpx.AsyncClient] = None
+        self._client_requests: Dict[httpx.AsyncClient, int] = {}
 
     def _get_proxy_url(self) -> Optional[str]:
         if not self.proxy:
@@ -81,7 +86,7 @@ class TMDBClient:
         return httpx.AsyncClient(
             proxy=self._get_proxy_url(),
             headers=self.headers,
-            timeout=30.0,
+            timeout=self.timeout,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
 
@@ -89,20 +94,22 @@ class TMDBClient:
         async with self._state_lock:
             if self._client is None or self._client.is_closed:
                 self._client = await self._create_client()
-            self._active_requests += 1
+                self._client_requests[self._client] = 0
+            self._client_requests[self._client] += 1
             return self._client
 
     async def _release_client(self, client: httpx.AsyncClient) -> None:
-        pending_close: Optional[httpx.AsyncClient] = None
+        close_target: Optional[httpx.AsyncClient] = None
         async with self._state_lock:
-            self._active_requests = max(0, self._active_requests - 1)
-            if self._active_requests == 0 and self._pending_close is not None:
-                pending_close = self._pending_close
-                self._pending_close = None
+            if client in self._client_requests:
+                self._client_requests[client] = max(0, self._client_requests[client] - 1)
+                if self._client_requests[client] == 0 and client is not self._client:
+                    del self._client_requests[client]
+                    close_target = client
 
-        if pending_close and not pending_close.is_closed:
+        if close_target and not close_target.is_closed:
             try:
-                await pending_close.aclose()
+                await close_target.aclose()
                 logger.info("旧 TMDB HTTP 客户端已在请求结束后安全关闭")
             except Exception as exc:
                 logger.warning(
@@ -127,13 +134,15 @@ class TMDBClient:
             self._client = None
             logger.warning(f"TMDB HTTP 客户端已重置: reason={reason}")
 
-            if target_client and not target_client.is_closed:
-                if self._active_requests > 0:
-                    self._pending_close = target_client
-                    logger.info(
-                        f"旧 TMDB HTTP 客户端将延迟到所有活跃请求完成后关闭. reason={reason}"
-                    )
-                    return
+            active_count = self._client_requests.get(target_client, 0) if target_client else 0
+            if active_count > 0:
+                logger.info(
+                    f"旧 TMDB HTTP 客户端将延迟到该客户端的所有活跃请求完成后关闭. reason={reason}"
+                )
+                return
+
+            if target_client in self._client_requests:
+                del self._client_requests[target_client]
 
         if target_client and not target_client.is_closed:
             try:
@@ -211,7 +220,9 @@ class TMDBClient:
                 raise
             except Exception as exc:
                 if attempt >= self.max_retries or not self._should_recreate_client(exc):
-                    logger.error(
+                    is_network_err = isinstance(exc, (httpx.RequestError, anyio.ClosedResourceError)) or type(exc).__name__ == "ClosedResourceError"
+                    log_func = logger.warning if is_network_err else logger.error
+                    log_func(
                         f"TMDB API 请求最终失败: endpoint={endpoint} attempt={attempt + 1}/{self.max_retries + 1} "
                         f"proxy_enabled={bool(self.proxy)} type={type(exc).__name__} detail={repr(exc)}"
                     )
