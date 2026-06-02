@@ -157,7 +157,7 @@ class TMDBClient:
         """关闭客户端。"""
         await self.reset_client(reason="application_shutdown")
 
-    def get_full_params(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get_full_params(self, params: Optional[Dict[str, Any]] = None, endpoint: Optional[str] = None) -> Dict[str, Any]:
         """获取完整的请求参数（包含注入的 API Key、语言和成人内容设置）。"""
         full_params = dict(params) if params else {}
 
@@ -168,8 +168,15 @@ class TMDBClient:
         # 强制注入成人内容解锁
         full_params["include_adult"] = "true"
 
+        # 排除图片相关接口（例如 /images），以防止默认语言参数过滤导致无法获取图片
+        is_image_endpoint = False
+        if endpoint:
+            parts = [p.strip().lower() for p in endpoint.split("/") if p.strip()]
+            if "images" in parts:
+                is_image_endpoint = True
+
         # 注入语言
-        if "language" not in full_params:
+        if not is_image_endpoint and "language" not in full_params:
             full_params["language"] = self.language
 
         return full_params
@@ -184,7 +191,7 @@ class TMDBClient:
     ) -> Dict[str, Any]:
         """发起异步请求，并在连接异常时自动重建客户端。"""
         url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-        full_params = self.get_full_params(params)
+        full_params = self.get_full_params(params, endpoint)
 
         request_headers = self.headers.copy()
         if headers:

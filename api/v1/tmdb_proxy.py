@@ -126,7 +126,7 @@ async def _fetch_tmdb_data(
             )
             retry_query_params = dict(request_query_params)
             retry_query_params.pop("api_key", None)
-            full_retry_params = tmdb_client.get_full_params(retry_query_params)
+            full_retry_params = tmdb_client.get_full_params(retry_query_params, endpoint)
             return await tmdb_client.get(endpoint, params=full_retry_params)
         raise
 
@@ -141,7 +141,7 @@ async def _proxy_request(
     auth_header = request.headers.get("Authorization")
     headers = {"Authorization": auth_header} if auth_header else None
     request_query_params = dict(request.query_params)
-    params = tmdb_client.get_full_params(request_query_params)
+    params = tmdb_client.get_full_params(request_query_params, endpoint)
 
     cached_data: Optional[Dict[str, Any]] = None
     is_stale = False
