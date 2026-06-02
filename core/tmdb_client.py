@@ -179,6 +179,15 @@ class TMDBClient:
         if not is_image_endpoint and "language" not in full_params:
             full_params["language"] = self.language
 
+        # 如果请求中带有 append_to_response 且包含了 images，
+        # 则必须确保有 include_image_language，否则 TMDB 会因为主语言（如 zh-CN）过滤掉所有无语言标识（null）和英文（en）的图片
+        if "append_to_response" in full_params:
+            append_parts = [p.strip().lower() for p in str(full_params["append_to_response"]).split(",") if p.strip()]
+            if "images" in append_parts:
+                if "include_image_language" not in full_params:
+                    # 语言列表包含：英文、无语言标识(最重要的高清背景/海报)、中文、和配置的主语言
+                    full_params["include_image_language"] = f"en,null,zh,{self.language}"
+
         return full_params
 
     async def request(
