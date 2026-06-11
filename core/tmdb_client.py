@@ -190,6 +190,10 @@ class TMDBClient:
 
         return full_params
 
+    def _is_retryable_http_status(self, status_code: int) -> bool:
+        # 5xx 一般是 TMDB 或代理的短暂抖动，允许有限重试，避免把瞬时故障升级成监控异常。
+        return 500 <= status_code < 600
+
     async def request(
         self,
         method: str,
@@ -228,7 +232,30 @@ class TMDBClient:
                 return response.json()
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
-                log_func = logger.warning if status_code == 404 else logger.error
+
+                if status_code == 401 and self.read_access_token:
+                    logger.warning(
+                        f"TMDB API 请求失败: endpoint={endpoint} status_code={status_code} "
+                        f"type={type(exc).__name__} detail={repr(exc)}"
+                    )
+                    raise
+
+                if self._is_retryable_http_status(status_code) and attempt < self.max_retries:
+                    logger.warning(
+                        f"TMDB API 返回可重试的 HTTP 错误，准备重试: endpoint={endpoint} "
+                        f"status_code={status_code} attempt={attempt + 1}/{self.max_retries + 1} "
+                        f"proxy_enabled={bool(self.proxy)} detail={repr(exc)}"
+                    )
+                    await self.reset_client(
+                        client,
+                        f"http_status_retry endpoint={endpoint} status_code={status_code} attempt={attempt + 1}",
+                    )
+                    backoff_delay = 2 * (attempt + 1)
+                    logger.info(f"由于 HTTP {status_code} 异常，将在 {backoff_delay} 秒后重试...")
+                    await asyncio.sleep(backoff_delay)
+                    continue
+
+                log_func = logger.warning if status_code == 404 or status_code >= 500 else logger.error
                 log_func(
                     f"TMDB API 请求失败: endpoint={endpoint} status_code={status_code} "
                     f"type={type(exc).__name__} detail={repr(exc)}"
